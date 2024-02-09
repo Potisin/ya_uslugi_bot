@@ -1,5 +1,4 @@
 import asyncio
-import hashlib
 import json
 import logging
 import os
@@ -31,7 +30,7 @@ def get_chrome_driver() -> WebDriver:
     options.add_argument("--disable-infobars")
     options.add_argument("--disable-save-password-bubble")
     options.add_argument("--enable-automation")
-    # options.add_argument('--headless=new')
+    options.add_argument('--headless=new')
     options.add_experimental_option("excludeSwitches", ['enable-automation'])
     driver = webdriver.Chrome(options=options)
     return driver
@@ -45,6 +44,7 @@ class YaUslugiScraper:
         self.original_window = None
 
     async def run(self) -> None:
+        """Главная функция-цикл управления скриптом"""
         loop = asyncio.get_running_loop()
         await loop.run_in_executor(None, self.connect_to_site)
         while True:
@@ -61,6 +61,7 @@ class YaUslugiScraper:
                 await loop.run_in_executor(None, self.stop)
 
     def connect_to_site(self) -> None:
+        """Заходит най сайт, добавляет куки, переходит на страницу с заказами, устанавливает фильтр"""
         driver = self.driver
         driver.maximize_window()
         self.original_window = driver.current_window_handle
@@ -84,8 +85,9 @@ class YaUslugiScraper:
         time.sleep(3)
 
     async def browsing_orders(self) -> None:
+        """Обходит все страницы с заказами, добавляет в БД, откликается, как только встречает заказ,
+         который уже есть в БД, прекращает выполнение, выходит в главный цикл"""
         driver = self.driver
-        i = 0
         while True:  # проход по страницам
             order_cards = (WebDriverWait(driver, 10).until(
                 EC.visibility_of_all_elements_located((By.CSS_SELECTOR, '.OrderCard2.Card'))))
@@ -105,12 +107,10 @@ class YaUslugiScraper:
                                               contact=contact)
                                 session.add(order)
                                 await session.commit()
-                                print('в бд добавили')
-                                self.apply_for_order(url)  # откликается если в бд все сохранилось успешно
+                                self.apply_for_order(url)  # откликается только если в бд все сохранилось успешно
                             # если заказ уже есть в базе, то выходим, т.к. сортировка по дате,
                             # а значит все остальные заказы уже есть в базе
                             except IntegrityError:
-                                print('exit from bd')
                                 await session.rollback()
                                 return
 
@@ -121,31 +121,39 @@ class YaUslugiScraper:
                 # возвращение к первой странице
                 driver.find_element(By.XPATH, "//a[text()='Поиск заказов']").click()
                 return
-
-            i += 1
-            if i == 1:
-                break
             time.sleep(3)
 
-    def apply_for_order(self, url):
+    def apply_for_order(self, url: str) -> None:
+        """Устанавливает тип цены, цену, текст, откликается на заказ"""
         driver = self.driver
         self.new_window('open')
         driver.get(url)
         time.sleep(3)
         # устанавливает тип цены "за услугу"
-        driver.find_element(By.CLASS_NAME, 'select2__button').click()
-        time.sleep(1)
-        WebDriverWait(driver, 10).until(EC.element_to_be_clickable(
-            (By.XPATH, "//div[contains(@class, 'menu__item') and .//span[text()='за услугу']]"))).click()
-        # устанавливает стоимость
-        price_input = driver.find_element(By.CLASS_NAME, 'textinput__control')
-        price_input.send_keys(1000)
-        time.sleep(1)
-        driver.find_element(By.CLASS_NAME, 'Button2_type_submit').click()
-        time.sleep(3)
+        try:
+            driver.find_element(By.CLASS_NAME, 'select2__button').click()
+            time.sleep(1)
+            WebDriverWait(driver, 10).until(EC.element_to_be_clickable(
+                (By.XPATH, "//div[contains(@class, 'menu__item') and .//span[text()='за услугу']]"))).click()
+            respond_message_input = driver.find_element(By.CLASS_NAME, 'Textarea-Control')
+            respond_message_input.send_keys('') # ЗДЕСЬ можно указать сообщение, которое будет отправлено при отклике
+            # устанавливает стоимость
+            price_input = driver.find_element(By.CLASS_NAME, 'textinput__control')
+            price_input.send_keys(1000)
+            time.sleep(1)
+            driver.find_element(By.CLASS_NAME, 'Button2_type_submit')
+            time.sleep(3)
+
+        except NoSuchElementException as ex:
+            # в ходе тестирования или при других обстоятельствах может возникнуть ситуация, что в БД записи нет,
+            # а фактически отклик уже оставлен. в этом случае перехватываем ошибку NoSuchElementException
+            print(f'Ошибка при добавление отклика: {ex}. Вероятно на этот заказ уже оставлен отклик')
+            logger.error(f'Ошибка при добавление отклика: {ex}. Вероятно на этот заказ уже оставлен отклик')
+
         self.new_window('close')
 
     async def check_invites(self) -> None:
+        """Проверяет наличие сообщений в чате по заказам и приглашения, вносит изменения в БД"""
         driver = self.driver
         self.new_window('open')
         driver.get('https://uslugi.yandex.ru/cab/connections')
@@ -156,6 +164,7 @@ class YaUslugiScraper:
         self.new_window('close')
 
     async def update_orders(self, card_class: str, link_selector: str):
+        """Изменяет параметр is_invited у заказов, на которые пригласили или добавили в чат"""
         order_cards = self.driver.find_elements(By.CLASS_NAME, card_class)
         for order in order_cards:
             url = order.find_element(By.CSS_SELECTOR, link_selector).get_attribute('href')
@@ -165,6 +174,7 @@ class YaUslugiScraper:
                 await session.commit()
 
     def new_window(self, action: str) -> None:
+        """Управляет новым окном(вкладкой)"""
         driver = self.driver
         if action == "open":
             # Открытие новой вкладки
@@ -181,8 +191,8 @@ class YaUslugiScraper:
         print("Работа в браузере остановлена")
 
     def add_cookie_to_driver(self) -> None:
+        """Преобразовывает сохраненные куки из браузера в куки, которые поддерживаются селениумом """
         if os.path.exists(self.cookies_path):
-            # Ожидание для полной загрузки страницы
             time.sleep(2)
 
             # Загрузка и добавление куки

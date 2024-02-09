@@ -55,10 +55,12 @@ async def edit_process(message: types, state: FSMContext):
     keywords = [keyword.strip().lower() for keyword in message.text.split(',')]
     try:
         set_keywords(keywords)
-    except Exception:
+    except Exception as ex:
         await message.answer('Что-то пошло не так. Проверь список, '
                              'убедись что разделил слова запятыми и отправь еще раз')
         await state.set_state(KeywordsState.keywords)
+        print(f'Ошибка при изменении списка ключевых слов в ТГ боте: {ex}')
+        logger.error(f'Ошибка при изменении списка ключевых слов в ТГ боте: {ex}')
         return
     await message.answer('Отлично! Список ключевых слов изменен.')
     await state.clear()
